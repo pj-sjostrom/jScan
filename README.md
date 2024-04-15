@@ -15,6 +15,6 @@ jScan is meant to be used in conjunction with "Multipatch 1019.ipf" (see separat
 
 Optomapping data from individual postsyanptic cells can be analyzed with "CMap_v01.ipf" (this repository). Data from CMap is exported to a folder for postsynaptic cells of the same class, e.g. basket cells or Martinotti cells.
 
-Optomapping data across several cells of the same category can then be analyzed with "CMetaMap_v02.ipf" (this repository)
+Optomapping data across several cells of the same category can then be analyzed with "CMetaMap_v02.ipf" (this repository). A detailed manual describing how to use CMetaMap is provided as the PDF file "How to use CMetaMap_v01.pdf".
 
 2-photon imaging data such as line scans can be analyzed with "LineScanAnalysis12.ipf" (see separate repository). Despite its name, LineScanAnalysis12 also analyzes frame scans and movies. LineScanAnalysis12 will also analyze data from MBF Bioscience's ScanImage 2-photon imaging software.
