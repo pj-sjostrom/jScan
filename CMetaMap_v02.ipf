@@ -74,6 +74,16 @@
 //	*	TPR values are filtered for too small EPSP_1 values the same way as PPR values are filtered. This is done
 //		post hoc via a kludge, so potential bug warning, there is a dependency here!
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//	J.Sj., 2024-04-18
+//	*	Added non-parametric radial connectivity metric, Distance-Weighted Connectivity Metric, DWCM.
+//		for the radial connectivity plot.
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//	J.Sj., 2024-04-19
+//	*	Added lateral connectivity and EPSP amplitude plots.
+//	*	Added Distance-Weighted Connectivity Metric, DWCM, for the lateral connectivity plot too.
+//	*	Modified lateral and radial DWCM to use bin centres for calculation instead of left edge of bin.
+//	*	Added a Distance-Weighted EPSP Metric, DWEM, which was implemented laterally only.
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //	TO-DO AND PENDING BUG FIXES
@@ -81,7 +91,7 @@
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
-	// Types of source data:
+	//// Types of source data:
 	// (don't forget the underscore!)
 	// Resp;cellX;cellY;cellZ;UseAmp;PPR;	-- Connectivity, amplitude, PPR, and XYZ coordinates
 	// TPR									-- Triple pulse ratio (mean(E2+E3)/E1)
@@ -109,9 +119,93 @@ menu "Macros"
 	"Init Connectivity Meta-Mapper",CMM_init()
 	"Graphs to front",CMM_GraphsToFront()
 	"Kill graphs",CMM_KillGraphs()
-	"Export data for stats in R Studio",CMM_exportForStats()
+	Submenu "Export"
+		"Export data for stats in R Studio",CMM_exportForStats()
+		"Export radial DWCM values",CMM_exportRadDWCM()
+		"Export lateral DWCM values",CMM_exportLatDWCM()
+		"Export lateral DWEM values",CMM_exportLatDWEM()
+	End
 	"-"
 End
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+//// Export radial distance-dependence connectivity metrices, DWCM
+
+Function CMM_exportRadDWCM()
+
+	WAVE		wDWCM
+	
+	WaveStats/Q wDWCM
+	Variable/G	mean_DWCM = V_avg
+	Variable/G	SEM_DWCM = V_SEM
+	
+	print		"Radial DWCM :",mean_DWCM,"±",SEM_DWCM,"n =",V_npnts
+	print		"Individual values are now in clipboard"
+
+	String		scrapStr = ""
+	Variable	n = numpnts(wDWCM)
+	Variable	i
+	i = 0
+	do
+		scrapStr += num2str(wDWCM[i])+"\r"
+		i += 1
+	while(i<n)
+	PutScrapText scrapStr
+
+End
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+//// Export lateral distance-dependence connectivity metrices, DWCM
+
+Function CMM_exportLatDWCM()
+
+	WAVE		wLatDWCM
+	
+	WaveStats/Q wLatDWCM
+	Variable/G	mean_LatDWCM = V_avg
+	Variable/G	SEM_LatDWCM = V_SEM
+	
+	print		"Lateral DWCM :",mean_LatDWCM,"±",SEM_LatDWCM,"n =",V_npnts
+	print		"Individual values are now in clipboard"
+
+	String		scrapStr = ""
+	Variable	n = numpnts(wLatDWCM)
+	Variable	i
+	i = 0
+	do
+		scrapStr += num2str(wLatDWCM[i])+"\r"
+		i += 1
+	while(i<n)
+	PutScrapText scrapStr
+
+End
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+//// Export lateral distance-dependence EPSP metrices, DWEM
+
+Function CMM_exportLatDWEM()
+
+	WAVE		wLatDWEM
+	
+	WaveStats/Q wLatDWEM
+	Variable/G	mean_LatDWEM = V_avg
+	Variable/G	SEM_LatDWEM = V_SEM
+	
+	print		"Lateral DWEM :",mean_LatDWEM,"±",SEM_LatDWEM,"n =",V_npnts
+	print		"Individual values are now in clipboard"
+
+	String		scrapStr = ""
+	Variable	n = numpnts(wLatDWEM)
+	Variable	i
+	i = 0
+	do
+		scrapStr += num2str(wLatDWEM[i])+"\r"
+		i += 1
+	while(i<n)
+	PutScrapText scrapStr
+
+End
+
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 //// Combine data to export to Excel for R Studio stats treatment
@@ -1599,7 +1693,10 @@ Function CMM_analyzeFolder()
 
 	//// Find average postsynaptic cell location
 	CMM_findPostCellLoc(CMM_ExpList)
-
+	
+	//// Calculate the binned lateral connectivity and EPSP profiles
+	CMM_calculateLateral(CMM_ExpList)
+	
 	//// Create soma-centered layer boundaries
 	WAVE		wLayerOffs
 	WAVE		CMM_postY_mean
@@ -1824,17 +1921,21 @@ Function CMM_analyzeFolder()
 	radAmpSEM = 0
 	radPPRMean = 0
 	radPPRSEM = 0
-	Duplicate/O wx,radX
+	Duplicate/O wx,radX	//,radX_Sq
+//	radX_sq = wx^2
 	Variable	nPPR
 	Variable	radialStep = radX[1]-radX[0]
 	Variable	nBins = numpnts(radX)
 	Variable/G	CMM_nRadConn = 0
 	Variable/G	CMM_nRadTested = 0
+	Variable	DWCM						// Distance-Weighted Connectivity Metric
+	Variable	localSum
+	Make/O/N=(0)	wDWCM				// Collect all DWCM values here
 	nPPR = 0
-	j = 0
+	j = 0		// Count bins
 	do
 		Make/O/N=(0) workWave1,workWave2,workWave3
-		i = 0
+		i = 0	// Count experiments
 		do
 			currExp = StringFromList(i,CMM_ExpList)
 			WAVE		wy = $(currExp+"_RPercConn")
@@ -1851,6 +1952,17 @@ Function CMM_analyzeFolder()
 				CMM_nRadTested += sum(wRadTested)
 				WaveStats/Q PPRall
 				nPPR += V_npnts
+				// Calculate the Distance-Weighted Connectivity Metric, a non-parametric alternative to exponetial fits
+				Duplicate/O wy,wDWC,wy_peakNorm,wy_sumNorm
+				WaveStats/Q wy
+				wy_peakNorm /= V_max
+				localSum = sum(wy)
+				wy_sumNorm /= localSum
+				// wDWC are the distance-weighted connectivities _before_ summing them up
+				wDWC = wy_sumNorm*(radX+radialStep/2)
+				DWCM = sum(wDWC)
+				print i,"DWCM",DWCM
+				wDWCM[numpnts(wDWCM)] = {DWCM}		// Store away DWCMs for all experiments
 			endif
 			i += 1
 		while(i<nExps)
@@ -1882,7 +1994,7 @@ Function CMM_analyzeFolder()
 	ModifyGraph mode(radPercConnMean#1)=2
 	ModifyGraph rgb=(33536,40448,47872)
 	ModifyGraph offset(radPercConnMean#1)={radialStep/2,0}
-	ErrorBars radPercConnMean#1 Y,wave=(radPercConnSEM,radPercConnSEM)
+	ErrorBars radPercConnMean#1 Y,wave=(radPercConnSEM,)
 
 	K0 = 0;K1=radPercConnMean[0];						// Constrain to pass through max value, JSj 3 Feb 2023
 	CurveFit/H="110"/Q/M=2/W=0 exp, radPercConnMean/X=radX/D
@@ -1893,7 +2005,10 @@ Function CMM_analyzeFolder()
 
 	Label left "connectivity (%)"
 	Label bottom "radius (µm)"
-	Legend/C/N=text0/J/F=0/B=1/X=0.00/Y=5.00 "\\f01Radial connectivity\\f00\r"+num2str(CMM_nRadConn)+"/"+num2str(CMM_nRadTested)+" ("+num2str(Round(CMM_nRadConn/CMM_nRadTested*100))+"%) onto "+num2str(nExps)+" cells\r\\s(fit_radPercConnMean) tau = "+num2str(round(CMM_radialTau))+" µm"
+	WaveStats/Q wDWCM			// Warning! Whereas wDWCM is calculated in a loop, wLatDWCM is calculated in function CMM_calcLateralDWCM. Tidy this up later!
+	Variable/G	mean_DWCM = V_avg
+	Variable/G	SEM_DWCM = V_SEM
+	Legend/C/N=text0/J/F=0/B=1/X=0.00/Y=5.00 "\\f01Radial connectivity\\f00\r"+num2str(CMM_nRadConn)+"/"+num2str(CMM_nRadTested)+" ("+num2str(Round(CMM_nRadConn/CMM_nRadTested*100))+"%) onto "+num2str(nExps)+" cells\r\\s(fit_radPercConnMean) tau = "+num2str(round(CMM_radialTau))+" µm\rDWCM = "+num2str(mean_DWCM)+" ± "+num2str(SEM_DWCM)
 	ModifyGraph margin(left)=48,nticks(left)=3
 	
 	// Plot Radial Amplitude
@@ -1911,7 +2026,7 @@ Function CMM_analyzeFolder()
 	ModifyGraph mode(radAmpMean#1)=2
 	ModifyGraph rgb=(33536,40448,47872)
 	ModifyGraph offset(radAmpMean#1)={radialStep/2,0}
-	ErrorBars radAmpMean#1 Y,wave=(radAmpSEM,radAmpSEM)
+	ErrorBars radAmpMean#1 Y,wave=(radAmpSEM,)
 
 	Label left "amplitude (mV)\\u#2"
 	Label bottom "radius (µm)"
@@ -1933,7 +2048,7 @@ Function CMM_analyzeFolder()
 	ModifyGraph mode(radPPRMean#1)=2
 	ModifyGraph rgb=(33536,40448,47872)
 	ModifyGraph offset(radPPRMean#1)={radialStep/2,0}
-	ErrorBars radPPRMean#1 Y,wave=(radPPRSEM,radPPRSEM)
+	ErrorBars radPPRMean#1 Y,wave=(radPPRSEM,)
 
 	Label left "PPR"
 	Label bottom "radius (µm)"
@@ -2447,7 +2562,7 @@ Function CMM_analyzeFolder()
 	// Angular connectivity
 	WMClosePolarGraph("CMM_Graph16",0)
 	WMNewPolarGraph("_default_", "CMM_Graph16")
-	DoWindow/T CMM_Graph16,"Radial connectivity"
+	DoWindow/T CMM_Graph16,"Angular connectivity"
 	String		polarTraceName = WMPolarAppendTrace("CMM_Graph16",histAngularConn, $"", 360)
 	Variable	isFillToOrigin,isFillBehind,fillRed,fillGreen,fillBlue
 	String		fillYWaveName,fillXWaveName
@@ -2461,7 +2576,7 @@ Function CMM_analyzeFolder()
 	// Angular synaptic weight
 	WMClosePolarGraph("CMM_Graph17",0)
 	WMNewPolarGraph("_default_", "CMM_Graph17")
-	DoWindow/T CMM_Graph17,"Radial amplitude"
+	DoWindow/T CMM_Graph17,"Angular amplitude"
 	polarTraceName = WMPolarAppendTrace("CMM_Graph17",histAngularAmpMean, $"", 360)
 	WMPolarGetPolarTraceSettings("CMM_Graph17",polarTraceName,isFillToOrigin,isFillBehind,fillRed,fillGreen,fillBlue,fillYWaveName,fillXWaveName)
 	//		[make changes to any of isFillToOrigin,isFillBehind,fillRed,fillGreen,fillBlue,fillAlpha,fillYWaveName,fillXWaveName]
@@ -2513,8 +2628,133 @@ Function CMM_analyzeFolder()
 		while(k<numpnts(AmpW))
 		i += 1
 	while(i<nExps)
+	
+	// Plot Lateral Connectivity
+	WAVE		lateral_Conn_mean
+	WAVE		lateral_Conn_SEM
+	WAVE		lateral_Conn_n
+	WAVE		lateral_Conn_x
+	NVAR		lateral_xBinSize
+	NVAR		lateral_totConn
+	NVAR		lateral_totTested
+	Duplicate/O	lateral_Conn_mean,lateral_Conn_mean_forNs
+	lateral_Conn_mean_forNs = lateral_Conn_mean + lateral_Conn_SEM
+	DoWindow/K CMM_Graph18
+	Display /W=(35,53,572,389) lateral_Conn_mean vs lateral_Conn_x as "Lateral connectivity"
+	DoWindow/C CMM_Graph18
+	ModifyGraph mode=5
+	ModifyGraph rgb=(33536,40448,47872)
+	ModifyGraph hbFill=2
+	ModifyGraph useBarStrokeRGB=1
+	ModifyGraph manTick(left)={0,10,0,0},manMinor(left)={1,0}
+	SetAxis/A/N=1/E=1 left
+	SetAxis bottom,0,lateral_Conn_x[numpnts(lateral_Conn_x)-1]
+	
+	AppendToGraph lateral_Conn_mean vs lateral_Conn_x
+	ModifyGraph mode(lateral_Conn_mean#1)=2
+	ModifyGraph rgb=(33536,40448,47872)
+	ModifyGraph offset(lateral_Conn_mean#1)={lateral_xBinSize/2,0}
+	ErrorBars lateral_Conn_mean#1 Y,wave=(lateral_Conn_SEM,)
 
-	JT_ArrangeGraphs2("CMM_Graph3;CMM_Graph4;CMM_Graph10;CMM_Graph6;CMM_Graph7;CMM_Graph8;CMM_Graph11;CMM_Graph12;CMM_Graph9;CMM_Graph13;CMM_Graph14;CMM_Graph15;CMM_Graph16;CMM_Graph17;",4,6)
+	i = 0
+	do
+		currExp = StringFromList(i,CMM_ExpList)
+		AppendToGraph $(currExp+"_lateralConn") vs lateral_Conn_x
+		ModifyGraph mode($(currExp+"_lateralConn"))=0,lstyle($(currExp+"_lateralConn"))=1
+		ModifyGraph rgb($(currExp+"_lateralConn"))=(0,0,0)
+		ModifyGraph offset($(currExp+"_lateralConn"))={lateral_xBinSize/2,0}
+		i += 1
+	while(i<nExps)
+
+	K0 = 0;K1=radPercConnMean[0];						// Constrain to pass through max value
+	CurveFit/H="110"/Q/M=2/W=0/X exp, lateral_Conn_mean/X=lateral_Conn_x/D
+	ModifyGraph lstyle(fit_lateral_Conn_mean)=2,lsize(fit_lateral_Conn_mean)=2
+	ModifyGraph rgb(fit_lateral_Conn_mean)=(65535,0,0)
+	WAVE		W_coef
+	Variable/G	CMM_lateralTau = 1/W_coef[2]
+	
+	AppendToGraph	lateral_Conn_mean_forNs vs lateral_Conn_x
+	ModifyGraph mode(lateral_Conn_mean_forNs)=2
+	ModifyGraph rgb(lateral_Conn_mean_forNs)=(0,0,0)
+	ModifyGraph offset(lateral_Conn_mean_forNs)={lateral_xBinSize/2,0}
+	ModifyGraph mode(lateral_Conn_mean_forNs)=3,textMarker(lateral_Conn_mean_forNs)={lateral_Conn_n,"Helvetica",0,0,1,0.00,0.00}
+	
+	Label left "connectivity (%)"
+	Label bottom "lateral distance (µm)"
+	CMM_calcLateralDWCM()			// Warning! Whereas wDWCM is calculated in a loop, wLatDWCM is calculated in function CMM_calcLateralDWCM. Tidy this up later!
+	WAVE		wLatDWCM
+	WaveStats/Q wLatDWCM
+	Variable/G	mean_LatDWCM = V_avg
+	Variable/G	SEM_LatDWCM = V_SEM
+	Legend/C/N=text0/J/F=0/B=1/X=0.00/Y=5.00 "\\f01Lateral connectivity\\f00\r"+num2str(lateral_totConn)+"/"+num2str(lateral_totTested)+" ("+num2str(Round(lateral_totConn/lateral_totTested*100))+"%) onto "+num2str(nExps)+" cells\r\\s(fit_lateral_Conn_mean) tau = "+num2str(round(CMM_lateralTau))+" µm\rDWCM = "+num2str(mean_LatDWCM)+" ± "+num2str(SEM_LatDWCM)
+	ModifyGraph margin(left)=48,nticks(left)=3
+	
+	// Plot Lateral Amplitude
+	WAVE		lateral_Amp_mean
+	WAVE		lateral_Amp_SEM
+	WAVE		lateral_Amp_n
+	Duplicate/O	lateral_Amp_mean,lateral_Amp_mean_forNs
+	lateral_Amp_mean_forNs = JT_isNAN(lateral_Amp_SEM[p]) ? lateral_Amp_mean : lateral_Amp_mean + lateral_Amp_SEM
+	DoWindow/K CMM_Graph19
+	Display /W=(35,53,572,389) lateral_Amp_mean vs lateral_Conn_x as "Lateral amplitude"
+	DoWindow/C CMM_Graph19
+	ModifyGraph mode=5
+	ModifyGraph rgb=(33536,40448,47872)
+	ModifyGraph hbFill=2
+	ModifyGraph useBarStrokeRGB=1
+	SetAxis/A/N=1 left
+	SetAxis bottom,0,lateral_Conn_x[numpnts(lateral_Conn_x)-1]
+	
+	AppendToGraph lateral_Amp_mean vs lateral_Conn_x
+	ModifyGraph mode(lateral_Amp_mean#1)=2
+	ModifyGraph rgb=(33536,40448,47872)
+	ModifyGraph offset(lateral_Amp_mean#1)={lateral_xBinSize/2,0}
+	ErrorBars lateral_Amp_mean#1 Y,wave=(lateral_Amp_SEM,)
+
+	String	collectLateralAmp = ""
+	String	collectLateralAmpX = ""
+	i = 0
+	do
+		currExp = StringFromList(i,CMM_ExpList)
+		AppendToGraph $(currExp+"_lateralAmp") vs lateral_Conn_x
+		ModifyGraph mode($(currExp+"_lateralAmp"))=0,lstyle($(currExp+"_lateralAmp"))=1
+		ModifyGraph rgb($(currExp+"_lateralAmp"))=(0,0,0)
+		ModifyGraph offset($(currExp+"_lateralAmp"))={lateral_xBinSize/2,0}
+		collectLateralAmp += currExp+"_lateralAmp;"
+		collectLateralAmpX += "lateral_Conn_x;"
+		i += 1
+	while(i<nExps)
+	Concatenate/O/NP collectLateralAmp,allLateralAmp	// Collect all data into a single pair of y and x waves, for the purposes of exponential curve fit
+	Concatenate/O/NP collectLateralAmpX,allLateralAmpX
+	AppendToGraph allLateralAmp vs allLateralAmpX
+	ModifyGraph hideTrace(allLateralAmp)=1
+	
+	K0 = 0;
+	CurveFit/H="100"/Q/M=2/W=0/X exp, allLateralAmp/X=allLateralAmpX/D
+	ModifyGraph lstyle(fit_allLateralAmp)=2,lsize(fit_allLateralAmp)=2
+	ModifyGraph rgb(fit_allLateralAmp)=(65535,0,0)
+	WAVE		W_coef
+	Variable/G	CMM_lateralETau = 1/W_coef[2]
+
+	AppendToGraph	lateral_Amp_mean_forNs vs lateral_Conn_x
+	ModifyGraph mode(lateral_Amp_mean_forNs)=2
+	ModifyGraph rgb(lateral_Amp_mean_forNs)=(0,0,0)
+	ModifyGraph offset(lateral_Amp_mean_forNs)={lateral_xBinSize/2,0}
+	ModifyGraph mode(lateral_Amp_mean_forNs)=3,textMarker(lateral_Amp_mean_forNs)={lateral_Amp_n,"Helvetica",0,0,1,0.00,0.00}
+
+	Label left "amplitude (mV)\\u#2"
+	Label bottom "lateral distance (µm)"
+	CMM_calcLateralDWEM()
+	WAVE		wLatDWEM
+	WaveStats/Q wLatDWEM
+	Variable/G	mean_LatDWEM = V_avg
+	Variable/G	SEM_LatDWEM = V_SEM
+	Legend/C/N=text0/J/F=0/B=1/X=0.00/Y=5.00 "\\f01Lateral EPSP amplitude\\f00\r"+num2str(lateral_totConn)+"/"+num2str(lateral_totTested)+" ("+num2str(Round(lateral_totConn/lateral_totTested*100))+"%) onto "+num2str(nExps)+" cells\r\\s(fit_allLateralAmp) tau = "+num2str(round(CMM_lateralETau))+" µm\rDWEM = "+num2str(mean_LatDWEM)+" ± "+num2str(SEM_LatDWEM)
+	ModifyGraph margin(left)=48,nticks(left)=3
+	
+
+
+	JT_ArrangeGraphs2("CMM_Graph3;CMM_Graph4;CMM_Graph10;CMM_Graph6;CMM_Graph7;CMM_Graph8;CMM_Graph11;CMM_Graph12;CMM_Graph9;CMM_Graph13;CMM_Graph14;CMM_Graph15;CMM_Graph16;CMM_Graph17;CMM_Graph18;CMM_Graph19;",4,6)
 	JT_ArrangeGraphs2(";;;;;;;;;;;;CMM_Graph1;CMM_Graph2;",3,6)
 	JT_ArrangeGraphs2(";;;;;;;;;;;;CMM_Graph1_cent;CMM_Graph2_cent;",3,6)
 	JT_ArrangeGraphs4(";;;;;;;;;;;;CMM_Graph1_cent;CMM_Graph2_cent;",32,32)			// move graphs a bit
@@ -2525,6 +2765,84 @@ Function CMM_analyzeFolder()
 	AutoPositionWindow/M=1/R=CMM_Graph1_dist CMM_CrossSectionXGraph
 	JT_CopyWindowHeight("CMM_Graph1_dist","CMM_CrossSectionYGraph")
 	AutoPositionWindow/M=0/R=CMM_Graph1_dist CMM_CrossSectionYGraph
+
+End
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+//// Calculate the Distance-Weighted Connectivity Metric, DWCM, laterally (radially is done in the loop)
+
+Function CMM_calcLateralDWCM()
+
+	WAVE		lateral_Conn_x
+	SVAR		CMM_ExpList
+	Variable	nExps = itemsInList(CMM_ExpList)
+
+	Variable	DWCM						// Distance-Weighted Connectivity Metric
+	Variable	localSum
+	Variable	binSize = lateral_Conn_x[1]-lateral_Conn_x[0]
+	Make/O/N=(0)	wLatDWCM			// Collect all lateral DWCM values here
+	String		currExp
+
+	Variable	i
+	i = 0
+	do
+		currExp = StringFromList(i,CMM_ExpList)
+		WAVE		wLateralConn = $(currExp+"_lateralConn")
+		// Calculate the Distance-Weighted Connectivity Metric, a non-parametric alternative to exponential fits
+		Duplicate/O wLateralConn,wLateralConn_noNANs
+		JT_RemoveNANs(wLateralConn_noNANs)
+		Duplicate/O wLateralConn_noNANs,wDWC,wLateralConn_peakNorm,wLateralConn_sumNorm
+		WaveStats/Q wLateralConn_noNANs
+		wLateralConn_peakNorm /= V_max
+		localSum = sum(wLateralConn_noNANs)
+		wLateralConn_sumNorm /= localSum
+		// wDWC are the distance-weighted connectivities _before_ summing them up
+		wDWC = wLateralConn_sumNorm*(lateral_Conn_x+binSize/2)
+		DWCM = sum(wDWC)
+		print i,"lateral DWCM",DWCM
+		wLatDWCM[numpnts(wLatDWCM)] = {DWCM}		// Store away lateral DWCMs for all experiments
+
+		i += 1
+	while(i<nExps)
+
+End
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+//// Calculate the Distance-Weighted EPSP Metric, DWEM, laterally
+
+Function CMM_calcLateralDWEM()
+
+	WAVE		lateral_Conn_x
+	SVAR		CMM_ExpList
+	Variable	nExps = itemsInList(CMM_ExpList)
+
+	Variable	DWEM						// Distance-Weighted Connectivity Metric
+	Variable	localSum
+	Variable	binSize = lateral_Conn_x[1]-lateral_Conn_x[0]
+	Make/O/N=(0)	wLatDWEM			// Collect all lateral DWCM values here
+	String		currExp
+
+	Variable	i
+	i = 0
+	do
+		currExp = StringFromList(i,CMM_ExpList)
+		WAVE		wLateralAmp = $(currExp+"_lateralAmp")
+		// Calculate the Distance-Weighted EPSP Metric, a non-parametric alternative to exponential fits
+		Duplicate/O wLateralAmp,wLateralAmp_noNANs
+		JT_RemoveNANs(wLateralAmp_noNANs)
+		Duplicate/O wLateralAmp_noNANs,wDWE,wLateralAmp_peakNorm,wLateralAmp_sumNorm
+		WaveStats/Q wLateralAmp_noNANs
+		wLateralAmp_peakNorm /= V_max
+		localSum = sum(wLateralAmp_noNANs)
+		wLateralAmp_sumNorm /= localSum
+		// wDWE are the distance-weighted EPSP amplitudes _before_ summing them up
+		wDWE = wLateralAmp_sumNorm*(lateral_Conn_x+binSize/2)
+		DWEM = sum(wDWE)
+		print i,"lateral DWEM",DWEM
+		wLatDWEM[numpnts(wLatDWEM)] = {DWEM}		// Store away lateral DWEMs for all experiments
+
+		i += 1
+	while(i<nExps)
 
 End
 
@@ -3224,6 +3542,134 @@ Function CMM_createRadialCoords(theExpList)
 		while(j<numpnts(wX))
 		i += 1
 	while(i<n)
+	
+End
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+//// Calculate the lateral connectivity and EPSP amplitudes
+
+Function CMM_calculateLateral(theExpList)
+	String		theExpList
+
+	print "Calculate lateral connectivity"
+
+	// LayerLoc		-- layer location (0 - L1; 1 - L2/3; 2 - L4; 3 - L5; 4 - L6; 5 - WM)
+	
+	Variable/G	lateral_xBinSize = 50	// µm
+	Variable/G	lateral_totConn = 0
+	Variable/G	lateral_totTested = 0
+
+	String		currExp
+	Variable	postCellLayerLoc
+	Variable	isInLayer		// Boolean
+	Variable	maxX = -Inf		// Maximum x-axis distance
+	
+	Variable	n = itemsInList(theExpList)
+	Variable	nPoints
+	Variable	i,j,k
+	i = 0
+	do
+		currExp = StringFromList(i,theExpList)
+		WAVE		wx = $(currExp+"_cellX")
+		WAVE		LayerLoc = $(currExp+"_LayerLoc")
+		Duplicate/O $(currExp+"_cellX"),$(currExp+"_cellX_wrapped")
+		WAVE		wx_wrapped = $(currExp+"_cellX_wrapped")
+		wx_wrapped = abs(wx)		// Only allow positive values; wrap negative to the positive
+		WaveStats/Q wx_wrapped
+		if (maxX < V_max)		// Find maximum x-value across experiments
+			maxX = V_max
+		endif
+		i += 1
+	while(i<n)
+
+	// Create wave to store away lateral connectivity and EPSP amp for individual experiments
+	Variable	nBins = Ceil(maxX/lateral_xBinSize)+1
+	i = 0
+	do
+		currExp = StringFromList(i,theExpList)
+		Make/O/N=(nBins) $(currExp+"_lateralConn"),$(currExp+"_lateralAmp")
+		WAVE		wThisLateralConn = $(currExp+"_lateralConn")
+		wThisLateralConn = 0
+		WAVE		wThisLateralAmp = $(currExp+"_lateralAmp")
+		wThisLateralAmp = 0
+		i += 1
+	while(i<n)
+
+	// Calculate binned connectivity and EPSP amplitude laterally
+	Variable	xLow,xHigh
+	Variable	countConn,countAll
+	Make/O/N=(nBins) lateral_Conn_mean,lateral_Conn_SEM,lateral_Conn_n,lateral_Conn_x
+	Make/O/N=(nBins) lateral_Amp_mean,lateral_Amp_SEM,lateral_Amp_n
+	SetScale/P x 0,lateral_xBinSize,"µm", lateral_Conn_mean,lateral_Amp_mean
+	lateral_Conn_mean = 0
+	lateral_Conn_SEM = 0
+	lateral_Conn_n = 0
+	lateral_Amp_mean = 0
+	lateral_Amp_SEM = 0
+	lateral_Amp_n = 0
+	lateral_Conn_x = p*lateral_xBinSize
+	k = 0		// Count bins
+	do
+		xLow = k*lateral_xBinSize
+		xHigh = (k+1)*lateral_xBinSize
+		Make/O/N=(n)	workWave			// n experiments
+		Make/O/N=(0)	workWave2			// unknown number of responses, across all experiments
+		i = 0	// Count experiments
+		do
+			currExp = StringFromList(i,theExpList)
+			WAVE		wx = $(currExp+"_cellX")
+			WAVE		wx_wrapped = $(currExp+"_cellX_wrapped")
+			WAVE		LayerLoc = $(currExp+"_LayerLoc")
+			WAVE		resp = $(currExp+"_Resp")
+			WAVE		UseAmp = $(currExp+"_UseAmp")
+			WAVE		wThisLateral = $(currExp+"_lateralConn")
+			WAVE		currLateralAmp = $(currExp+"_lateralAmp")
+			postCellLayerLoc = LayerLoc[0]
+			CountConn = 0
+			CountAll = 0
+			Make/O/N=(0)	workWave3	// this is for individual experiments
+			j = 1	// Count data points in experiments, skipping zeroth position, since that's the postsynaptic cell
+			nPoints = numpnts(wx)
+			do
+				if (LayerLoc[j] == postCellLayerLoc)							// In layer?
+					if ((wx_wrapped[j] >= xLow) %& (wx_wrapped[j] < xHigh))		// In x bin?
+						countAll += 1
+						if (resp[j])											// Connected?
+							workWave2[numpnts(workWave2)] = {UseAmp[j]}			// Collected across all experiments
+							workWave3[numpnts(workWave3)] = {UseAmp[j]}			// Collected for one experiment
+							countConn += 1
+						endif
+					endif
+				endif
+				j += 1
+			while(j<nPoints)
+			workWave[i] = countConn/countAll
+			wThisLateral[k] = workWave[i]*100	// Store away lateral connectivity for individual experiments, for debugging purposes
+			lateral_totConn += countConn
+			lateral_totTested += countAll
+			if (countAll == 0)
+				workWave[i] = NaN
+			endif
+			if (numpnts(workWave3)>0)
+				WaveStats/Q workWave3
+				currLateralAmp[k] = V_avg
+			endif
+			i += 1
+		while(i<n)
+		WaveStats/Q workWave
+		lateral_Conn_mean[k] = V_avg*100		// Mean connectivity in percentage terms
+		lateral_Conn_SEM[k] = V_SEM*100
+		lateral_Conn_n[k] = V_npnts				// n can vary for most distal bins, in case some cells do not have enough data
+		if (numpnts(workWave2)>0)
+			WaveStats/Q workWave2
+			lateral_Amp_mean[k] = V_avg			// Mean EPSP amplitude
+			lateral_Amp_SEM[k] = V_SEM
+			lateral_Amp_n[k] = V_npnts			// Here, n varies from bin to bin, as n denotes EPSPs, not postsynaptic cells
+		else
+			lateral_Amp_n[k] = 0
+		endif
+		k += 1
+	while(k<nBins)
 	
 End
 
